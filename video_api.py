@@ -158,9 +158,11 @@ async def stitch_videos(
             video_paths.append(file_path)
             print(f"Saved: {file.filename} ({len(content) / 1024:.2f} KB)")
 
-        # Stitch videos
-        output_filename = "stitched_video.mp4"
-        output_path = os.path.join(stitcher.output_dir, output_filename)
+        # Create unique output filename for this request
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        output_filename = f"stitched_video_{unique_id}.mp4"
+        output_path = os.path.join(temp_dir, output_filename)  # Save in temp_dir instead
 
         result_path = stitcher.stitch_videos_ffmpeg(video_paths, output_path, method=method)
 
@@ -170,7 +172,7 @@ async def stitch_videos(
         return FileResponse(
             result_path, 
             media_type="video/mp4",
-            filename=output_filename,
+            filename="stitched_video.mp4",  # Keep a clean name for download
             headers={
                 "X-Video-Count": str(len(files)),
                 "X-Output-Size": str(file_size),
