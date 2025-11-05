@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 import subprocess
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 
@@ -166,14 +166,23 @@ async def stitch_videos(
 
         result_path = stitcher.stitch_videos_ffmpeg(video_paths, output_path, method=method)
 
-        # Get file size
+        # Get file size and read content before cleanup
         file_size = os.path.getsize(result_path)
-
-        return FileResponse(
-            result_path, 
+        
+        # Read the file content into memory
+        with open(result_path, 'rb') as f:
+            video_content = f.read()
+        
+        # Clean up temp directory immediately after reading
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        # Return the video content as a response
+        from fastapi.responses import Response
+        return Response(
+            content=video_content,
             media_type="video/mp4",
-            filename="stitched_video.mp4",  # Keep a clean name for download
             headers={
+                "Content-Disposition": "attachment; filename=stitched_video.mp4",
                 "X-Video-Count": str(len(files)),
                 "X-Output-Size": str(file_size),
                 "X-Method-Used": method
@@ -181,20 +190,22 @@ async def stitch_videos(
         )
 
     except subprocess.CalledProcessError as e:
+        # Clean up on error
+        shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500, 
             detail=f"Video processing failed: {str(e)}"
         )
     except Exception as e:
+        # Clean up on error
+        shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500, 
             detail=f"Error: {str(e)}"
         )
-    finally:
-        # Cleanup temporary files
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 # Run with: uvicorn video_api:app --host 0.0.0.0 --port 8000
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
