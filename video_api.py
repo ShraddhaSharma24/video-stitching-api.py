@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 import subprocess
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 
@@ -209,9 +209,5 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-# Run with: uvicorn video_api:app --host 0.0.0.0 --port 8000
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
