@@ -3,8 +3,9 @@ import shutil
 from pathlib import Path
 from typing import List
 import subprocess
+import uuid
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 
@@ -24,10 +25,6 @@ app.add_middleware(
 )
 
 class VideoStitcher:
-    def __init__(self, output_dir: str = "output"):
-        self.output_dir = output_dir
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-
     def stitch_videos_ffmpeg(self, video_paths: List[str], output_path: str,
                             method: str = "concat") -> str:
         if not video_paths:
@@ -41,7 +38,8 @@ class VideoStitcher:
             return self._concat_filter(video_paths, output_path)
 
     def _concat_demuxer(self, video_paths: List[str], output_path: str) -> str:
-        concat_file = os.path.join(self.output_dir, "concat_list.txt")
+        # Create concat file in the same temp directory as output
+        concat_file = output_path + "_concat_list.txt"
         with open(concat_file, 'w') as f:
             for video_path in video_paths:
                 abs_path = os.path.abspath(video_path)
@@ -51,11 +49,16 @@ class VideoStitcher:
                '-c', 'copy', '-y', output_path]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             print(f"Video stitched successfully: {output_path}")
+            # Clean up concat file
+            os.remove(concat_file)
             return output_path
         except subprocess.CalledProcessError as e:
             print(f"FFmpeg concat failed: {e.stderr}")
+            # Try filter method as fallback
+            if os.path.exists(concat_file):
+                os.remove(concat_file)
             return self._concat_filter(video_paths, output_path)
 
     def _concat_filter(self, video_paths: List[str], output_path: str) -> str:
@@ -73,7 +76,7 @@ class VideoStitcher:
                '-c:v', 'libx264', '-c:a', 'aac', '-y', output_path]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             print(f"Video stitched successfully: {output_path}")
             return output_path
         except subprocess.CalledProcessError as e:
@@ -110,7 +113,6 @@ async def health_check():
         "ffmpeg_version": ffmpeg_version
     }
 
-# FIXED: This annotation properly supports multiple files in Swagger UI
 @app.post("/stitch", 
     summary="Stitch Multiple Videos",
     description="""
@@ -139,7 +141,12 @@ async def stitch_videos(
             detail=f"At least 2 videos required for stitching. You uploaded {len(files)} file(s)."
         )
 
-    temp_dir = tempfile.mkdtemp()
+    # Create a unique temp directory for this request
+    temp_dir = tempfile.mkdtemp(prefix="video_stitch_")
+    print(f"\n=== NEW REQUEST ===")
+    print(f"Temp directory: {temp_dir}")
+    print(f"Processing {len(files)} files")
+    
     video_paths = []
 
     try:
@@ -151,33 +158,42 @@ async def stitch_videos(
                     detail=f"Invalid file type: {file.filename}. Supported: mp4, avi, mov, mkv, webm"
                 )
 
-            file_path = os.path.join(temp_dir, f"video_{i:03d}_{file.filename}")
+            file_path = os.path.join(temp_dir, f"input_{i:03d}_{file.filename}")
+            content = await file.read()
             with open(file_path, 'wb') as f:
-                content = await file.read()
                 f.write(content)
             video_paths.append(file_path)
-            print(f"Saved: {file.filename} ({len(content) / 1024:.2f} KB)")
+            print(f"Saved input file {i+1}: {file.filename} ({len(content) / 1024:.2f} KB)")
 
-        # Create unique output filename for this request
-        import uuid
+        # Generate unique output filename
         unique_id = str(uuid.uuid4())[:8]
-        output_filename = f"stitched_video_{unique_id}.mp4"
-        output_path = os.path.join(temp_dir, output_filename)  # Save in temp_dir instead
+        output_filename = f"stitched_{unique_id}.mp4"
+        output_path = os.path.join(temp_dir, output_filename)
+        
+        print(f"Output file: {output_filename}")
 
+        # Stitch videos
         result_path = stitcher.stitch_videos_ffmpeg(video_paths, output_path, method=method)
 
-        # Get file size and read content before cleanup
+        # Verify the output file exists
+        if not os.path.exists(result_path):
+            raise Exception(f"Output file was not created: {result_path}")
+
+        # Get file size and read content
         file_size = os.path.getsize(result_path)
+        print(f"Reading output file: {file_size / 1024:.2f} KB")
         
-        # Read the file content into memory
         with open(result_path, 'rb') as f:
             video_content = f.read()
         
-        # Clean up temp directory immediately after reading
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"Video content loaded into memory: {len(video_content)} bytes")
         
-        # Return the video content as a response
-        from fastapi.responses import Response
+        # Clean up temp directory immediately
+        print(f"Cleaning up temp directory: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        print("Cleanup complete\n")
+        
+        # Return the video content
         return Response(
             content=video_content,
             media_type="video/mp4",
@@ -185,19 +201,20 @@ async def stitch_videos(
                 "Content-Disposition": "attachment; filename=stitched_video.mp4",
                 "X-Video-Count": str(len(files)),
                 "X-Output-Size": str(file_size),
-                "X-Method-Used": method
+                "X-Method-Used": method,
+                "X-Request-ID": unique_id
             }
         )
 
     except subprocess.CalledProcessError as e:
-        # Clean up on error
+        print(f"ERROR: FFmpeg failed - {e.stderr}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500, 
             detail=f"Video processing failed: {str(e)}"
         )
     except Exception as e:
-        # Clean up on error
+        print(f"ERROR: {str(e)}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500, 
@@ -208,6 +225,7 @@ async def stitch_videos(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 
